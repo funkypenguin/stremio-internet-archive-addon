@@ -31,6 +31,7 @@ async function fetchMovieStreams(id) {
         'mediatype:movies', // movies only
         'item_size:["300000000" TO "100000000000"]' // size between ~300MB and ~100GB
     ];
+    //// console.log(queryParts.join(' AND '));
     const iaUrl = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&sort=week:desc&hits_per_page=${MAX_STREAMS}`;
     // // console.log(iaUrl);
     const iaResponse = await fetch(iaUrl);
@@ -98,6 +99,8 @@ async function fetchMovieStreams(id) {
     }
     // console.log(` -> Returning ${streams.length} streams`);
     // // console.log(streams); // used for debugging
+    // const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
+    // console.log(`{"id": "${imdbId}", "name": "${film.name}", "identifier": "${identifier}", "type": "movie"}`);
     return { streams: streams }
 }
 
@@ -110,7 +113,7 @@ async function fetchSeriesStreams(id) {
     }
     const series = (await cinemetaResponse.json())?.meta;
     const episode = series.videos.find(e => e.season == season && e.episode == ep);
-    const epName = episode.name.replace(/^the /i,'') // remove 'the' at start
+    const epName = (episode.name || episode.title).replace(/^the /i,'') // remove 'the' at start
         .replace(/\W*part\W*[0-9IVX]+\W*/i,' ') // remove 'part x' from episode name
         .replace(/\(.*\)/g,'') // remove anything in parentheses
         // .replace(/[^a-z0-9]/g,'') // remove non-alphanumeric characters
@@ -123,6 +126,14 @@ async function fetchSeriesStreams(id) {
         'mediatype:movies', // videos only ('movies' on archive.org includes TV shows)
         '(series OR collection:(television OR unsorted_television))' // filter to TV shows only
     ];
+    if (series.genres.includes('Soap')) {
+        const mmyyyy = (episode.name || episode.title).match(
+            /(january|february|march|april|may|june|july|august|september|october|november|december).*([12][90]\d{2})/i
+        );
+        queryParts[0] = mmyyyy ? `title:(${series.name.toLowerCase()} ${mmyyyy[1]} ${mmyyyy[2]})` : queryParts[0];
+        queryParts.pop(); // remove series/collection filter for soaps
+    }
+    //// console.log(queryParts.join(' AND '));
     const iaUrl = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&hits_per_page=${MAX_STREAMS_SERIES}`;
     // console.log(iaUrl);
     const iaResponse = await fetch(iaUrl);
@@ -209,6 +220,8 @@ async function fetchSeriesStreams(id) {
     }
     // console.log(` -> Returning ${streams.length} streams`);
     // // console.log(streams); // used for debugging
+    // const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
+    // console.log(`{"id": "${imdbId}", "name": "${series.name}", "identifier": "${identifier}", "type": "series"}`);
     return { streams: streams }
 }
 
