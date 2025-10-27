@@ -5,7 +5,7 @@ const MAX_STREAMS_SERIES = 15;
 // this function converts number of bytes to a string ending in MB or GB
 const sizeToString = bytes => bytes >= 1073741824 ? `${(bytes/1073741824).toFixed(1)}GB` : `${(bytes/1048576).toFixed(0)}MB`;
 
-async function fetchMovieStreams(id) {
+async function fetchMovieStreams(id, log = {test:false, query:false}) {
     const imdbId = id;
     const cinemetaUrl = `https://v3-cinemeta.strem.io/meta/movie/${imdbId}.json`;
     const cinemetaResponse = await fetch(cinemetaUrl);
@@ -31,7 +31,7 @@ async function fetchMovieStreams(id) {
         'mediatype:movies', // movies only
         'item_size:["300000000" TO "100000000000"]' // size between ~300MB and ~100GB
     ];
-    //// console.log(queryParts.join(' AND '));
+    if (log.query) console.log(queryParts.join(' AND '));
     const iaUrl = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&sort=week:desc&hits_per_page=${MAX_STREAMS}`;
     // // console.log(iaUrl);
     const iaResponse = await fetch(iaUrl);
@@ -99,12 +99,14 @@ async function fetchMovieStreams(id) {
     }
     // console.log(` -> Returning ${streams.length} streams`);
     // // console.log(streams); // used for debugging
-    // const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
-    // console.log(`{"id": "${imdbId}", "name": "${film.name}", "identifier": "${identifier}", "type": "movie"}`);
+    if (log.test) {
+        const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
+        console.log(`{"id": "${imdbId}", "name": "${film.name}", "identifier": "${identifier}", "type": "movie"}`);
+    }
     return { streams: streams }
 }
 
-async function fetchSeriesStreams(id) {
+async function fetchSeriesStreams(id, log = {test:false, query:false}) {
     const [imdbId, season, ep] = id.split(':');
     const cinemetaUrl = `https://v3-cinemeta.strem.io/meta/series/${imdbId}.json`;
     const cinemetaResponse = await fetch(cinemetaUrl);
@@ -112,6 +114,7 @@ async function fetchSeriesStreams(id) {
         return { streams: [] };
     }
     const series = (await cinemetaResponse.json())?.meta;
+    const sMatchName = series.name.toLowerCase().replace(/\W/g,'*');
     const episode = series.videos.find(e => e.season == season && e.episode == ep);
     const epName = (episode.name || episode.title).replace(/^the /i,'') // remove 'the' at start
         .replace(/\W*part\W*[0-9IVX]+\W*/i,' ') // remove 'part x' from episode name
@@ -121,10 +124,10 @@ async function fetchSeriesStreams(id) {
     // console.log(epName);
 
     const queryParts = [
-        `(title:(${series.name.toLowerCase()}) OR title:(${epName.toLowerCase()}))`, // lowercase to avoid known ia bug with "TO" in title
+        `title:("${sMatchName}" OR *${sMatchName}*)`, // lowercase to avoid known ia bug with "TO" in title
         '-title:(trailer OR trailers OR promo OR promos OR review OR reviews OR interview OR interviews)', // exclude
         'mediatype:movies', // videos only ('movies' on archive.org includes TV shows)
-        '(series OR collection:(television OR unsorted_television))' // filter to TV shows only
+        '(series OR collection:(television OR unsorted_television OR opensource_movies))' // filter to TV shows only
     ];
     if (series.genres.includes('Soap')) {
         const mmyyyy = (episode.name || episode.title).match(
@@ -133,7 +136,7 @@ async function fetchSeriesStreams(id) {
         queryParts[0] = mmyyyy ? `title:(${series.name.toLowerCase()} ${mmyyyy[1]} ${mmyyyy[2]})` : queryParts[0];
         queryParts.pop(); // remove series/collection filter for soaps
     }
-    //// console.log(queryParts.join(' AND '));
+    if (log.query) console.log(queryParts.join(' AND '));
     const iaUrl = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&hits_per_page=${MAX_STREAMS_SERIES}`;
     // console.log(iaUrl);
     const iaResponse = await fetch(iaUrl);
@@ -220,8 +223,10 @@ async function fetchSeriesStreams(id) {
     }
     // console.log(` -> Returning ${streams.length} streams`);
     // // console.log(streams); // used for debugging
-    // const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
-    // console.log(`{"id": "${imdbId}", "name": "${series.name}", "identifier": "${identifier}", "type": "series"}`);
+    if (log.test) {
+        const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
+        console.log(`{"id": "${id}", "name": "${series.name}", "identifier": "${identifier}", "type": "series"}`);
+    }
     return { streams: streams }
 }
 
