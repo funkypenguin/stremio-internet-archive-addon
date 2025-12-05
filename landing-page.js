@@ -13,6 +13,7 @@ const defaultConfig = {
     logoUrl: '',
     logoSvg: '',
     blurbHtml: '',
+    disclaimerHtml: 'This add-on does not store or host any media. It simply surfaces public domain content already hosted on archive.org.',
 };
 
 const envMap = {
@@ -30,6 +31,7 @@ const envMap = {
     logoUrl: 'LANDING_LOGO',
     logoSvg: 'LANDING_LOGO_SVG',
     blurbHtml: 'LANDING_BLURB_HTML',
+    disclaimerHtml: 'LANDING_DISCLAIMER_HTML',
 };
 
 const escapeHtml = (value = '') => value
@@ -57,7 +59,7 @@ function renderLandingPage(overrides = {}) {
         : '';
     const encodedInstall = encodeURIComponent(cfg.installUrl);
     const desktopInstall = `stremio://addon-install?addon=${encodedInstall}`;
-    const webInstall = `https://web.strem.io/#/addons/subscribe?addon=${encodedInstall}`;
+    const webInstall = `https://web.stremio.com/#/addons/subscribe?addon=${encodedInstall}`;
     const inlineSvg = cfg.logoSvg && isInlineSvg(cfg.logoSvg)
         ? cfg.logoSvg
         : cfg.logoUrl && isInlineSvg(cfg.logoUrl)
@@ -77,6 +79,9 @@ function renderLandingPage(overrides = {}) {
             : '';
     const blurb = cfg.blurbHtml?.trim()
         ? `<div class="blurb">${cfg.blurbHtml}</div>`
+        : '';
+    const disclaimer = cfg.disclaimerHtml?.trim()
+        ? `<p class="disclaimer">${escapeHtml(cfg.disclaimerHtml)}</p>`
         : '';
 
     return `<!doctype html>
@@ -226,6 +231,12 @@ h1 {
     font-size: 0.95rem;
     color: #16f2b3;
 }
+.disclaimer {
+    margin-top: 1.25rem;
+    font-size: 0.95rem;
+    line-height: 1.5;
+    color: rgba(248, 250, 252, 0.65);
+}
 @media (max-width: 640px) {
     main {
         padding: 1.75rem;
@@ -251,6 +262,7 @@ h1 {
         <p class="tagline">${escapeHtml(cfg.tagline)}</p>
         <p class="description">${escapeHtml(cfg.description)}</p>
         ${blurb}
+        ${disclaimer}
         <div class="cta-grid">
             <button type="button" class="cta primary" data-url="${escapeHtml(desktopInstall)}" data-target="self">Install in Stremio</button>
             <button type="button" class="cta secondary-btn" data-url="${escapeHtml(webInstall)}" data-target="blank">Open in Stremio Web</button>

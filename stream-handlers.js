@@ -7,6 +7,7 @@ const ACCEPTED_FILE_TYPES = ['avi', 'mp4', 'mkv', 'wmv', 'mov', 'm4v'];
 const ACCEPTED_SUBTITLES = ['srt', 'vtt', 'ass'];
 const MAX_STREAMS = 5;
 const MAX_STREAMS_SERIES = 15;
+const SOURCE_LABEL = process.env.STREAM_SOURCE_LABEL || 'Archive.org';
 
 const dispatcher = new Agent({
     keepAliveTimeout: 10_000,
@@ -26,6 +27,54 @@ const refreshingKeys = new Set();
 const sizeToString = (bytes) => bytes >= 1073741824
     ? `${(bytes / 1073741824).toFixed(1)}GB`
     : `${(bytes / 1048576).toFixed(0)}MB`;
+
+const slugifyToken = (value = '') => value
+    .normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9]+/g, '.')
+    .replace(/\.+/g, '.')
+    .replace(/^\.+|\.+$/g, '');
+
+const buildReleaseSlug = ({
+    title,
+    year,
+    season,
+    episode,
+    quality,
+    resolution,
+    codec,
+    extension,
+}) => {
+    const tokens = [];
+    const titleToken = slugifyToken(title);
+    if (titleToken) tokens.push(titleToken);
+    if (year) tokens.push(String(year));
+    if (season && episode) {
+        const s = String(season).padStart(2, '0');
+        const e = String(episode).padStart(2, '0');
+        tokens.push(`S${s}E${e}`);
+    }
+    if (quality) tokens.push(slugifyToken(quality).toUpperCase());
+    if (resolution) tokens.push(`${resolution}p`);
+    const codecToken = codec || extension;
+    if (codecToken) tokens.push(slugifyToken(codecToken).toUpperCase());
+    const slugBase = (tokens.filter(Boolean).join('.')) || slugifyToken(title || 'ArchiveOrg');
+    const ext = (extension || '').replace(/^\./, '');
+    return ext ? `${slugBase}.${ext}` : slugBase;
+};
+
+function formatStreamName(sourceTitle, qualityTag, fileMeta) {
+    const detailParts = [];
+    if (qualityTag) detailParts.push(qualityTag.trim().toUpperCase());
+    if (fileMeta?.height) detailParts.push(`${fileMeta.height}p`);
+    const fileFormat = (fileMeta?.format || fileMeta?.source || fileMeta?.name?.split('.').pop() || '').toUpperCase();
+    if (fileFormat) detailParts.push(fileFormat);
+    const suffix = detailParts.length ? ` • ${detailParts.join(' · ')}` : '';
+    let emoji = '📼';
+    if ((fileMeta?.height || 0) >= 2160) emoji = '🌌';
+    else if ((fileMeta?.height || 0) >= 1080) emoji = '🎞️';
+    else if ((fileMeta?.height || 0) >= 720) emoji = '📽️';
+    return `${emoji} ${SOURCE_LABEL} • ${sourceTitle}${suffix}`;
+}
 
 async function limitedFetchJson(url, options = {}) {
     try {
@@ -155,17 +204,37 @@ async function buildMovieStreams(imdbId, log = { test: false, query: false }) {
         const quality = (res.fields.title + videoFiles[0].name + (res.fields.description || ''))
             .match(/(?:dvd|blu-?ray|bd|hd|web|nd-?rip)-?(?:rip|dl)?|remux/i)?.[0] || '';
         streams.push(
-            ...videoFiles.map((f) => ({
-                url: `https://archive.org/download/${identifier}/${f.name}`,
-                name: `Archive.org ${quality} ${f.height}p ${f.format}`,
-                description: `${res.fields.title}\n${f.name}\n🎬 ${f.name.slice(-3).toLowerCase()} (${f.source})\n🕥 ${(f.length / 60).toFixed(0)} min   💾 ${sizeToString(parseInt(f.size, 10) || 0)}`,
-                subtitles,
-                behaviorHints: {
-                    notWebReady: f.name.slice(-3).toLowerCase() !== 'mp4',
-                    videoSize: parseInt(f.size, 10) || 0,
-                    filename: f.name,
-                },
-            }))
+            ...videoFiles.map((f) => {
+                const extension = (f.name.split('.').pop() || '').toLowerCase();
+                const isWebReady = extension === 'mp4';
+                const sizeBytes = parseInt(f.size, 10) || 0;
+                const releaseSlug = buildReleaseSlug({
+                    title: res.fields.title || film.name,
+                    year,
+                    quality,
+                    resolution: f.height || undefined,
+                    codec: f.format || f.source || undefined,
+                    extension,
+                });
+                const sourceInfo = f.source ? ` (${f.source})` : '';
+                const detailLines = [
+                    res.fields.title,
+                    f.name !== releaseSlug ? `Source file: ${f.name}` : '',
+                    `🎬 ${extension || 'file'}${sourceInfo}`,
+                    `🕥 ${(f.length / 60).toFixed(0)} min   💾 ${sizeToString(sizeBytes)}`,
+                ].filter(Boolean);
+                return {
+                    url: `https://archive.org/download/${identifier}/${f.name}`,
+                    name: formatStreamName(res.fields.title || film.name, quality, f),
+                    description: [releaseSlug, ...detailLines].join('\n'),
+                    subtitles,
+                    behaviorHints: {
+                        notWebReady: !isWebReady,
+                        videoSize: sizeBytes,
+                        filename: releaseSlug,
+                    },
+                };
+            })
         );
     }
     const response = { streams };
@@ -182,6 +251,8 @@ async function buildSeriesStreams(id, log = { test: false, query: false }) {
     if (!series) {
         return { streams: [] };
     }
+    const seasonNumber = parseInt(season, 10) || undefined;
+    const episodeNumber = parseInt(ep, 10) || undefined;
     const sMatchName = series.name.toLowerCase().replace(/\W/g, '*');
     const episode = series.videos?.find((e) => e.season == season && e.episode == ep);
     if (!episode) {
@@ -233,17 +304,39 @@ async function buildSeriesStreams(id, log = { test: false, query: false }) {
         const quality = (res.fields.title + videoFiles[0].name + (res.fields.description || ''))
             .match(/(?:dvd|blu-?ray|bd|hd|web|nd-?rip)-?(?:rip|dl)?|remux/i)?.[0] || '';
         streams.push(
-            ...videoFiles.map((f) => ({
-                url: `https://archive.org/download/${identifier}/${f.name}`,
-                name: `Archive.org ${quality} ${f.height}p ${f.format}`,
-                description: `${res.fields.title}\n${f.name}\n🎬 ${f.name.slice(-3).toLowerCase()} (${f.source})\n🕥 ${(f.length / 60).toFixed(0)} min   💾 ${sizeToString(parseInt(f.size, 10) || 0)}`,
-                subtitles,
-                behaviorHints: {
-                    notWebReady: f.name.slice(-3).toLowerCase() !== 'mp4',
-                    videoSize: parseInt(f.size, 10) || 0,
-                    filename: f.name,
-                },
-            }))
+            ...videoFiles.map((f) => {
+                const extension = (f.name.split('.').pop() || '').toLowerCase();
+                const isWebReady = extension === 'mp4';
+                const sizeBytes = parseInt(f.size, 10) || 0;
+                const releaseSlug = buildReleaseSlug({
+                    title: res.fields.title || series.name,
+                    year: series.year,
+                    season: seasonNumber,
+                    episode: episodeNumber,
+                    quality,
+                    resolution: f.height || undefined,
+                    codec: f.format || f.source || undefined,
+                    extension,
+                });
+                const sourceInfo = f.source ? ` (${f.source})` : '';
+                const detailLines = [
+                    res.fields.title,
+                    f.name !== releaseSlug ? `Source file: ${f.name}` : '',
+                    `🎬 ${extension || 'file'}${sourceInfo}`,
+                    `🕥 ${(f.length / 60).toFixed(0)} min   💾 ${sizeToString(sizeBytes)}`,
+                ].filter(Boolean);
+                return {
+                    url: `https://archive.org/download/${identifier}/${f.name}`,
+                    name: formatStreamName(res.fields.title || series.name, quality, f),
+                    description: [releaseSlug, ...detailLines].join('\n'),
+                    subtitles,
+                    behaviorHints: {
+                        notWebReady: !isWebReady,
+                        videoSize: sizeBytes,
+                        filename: releaseSlug,
+                    },
+                };
+            })
         );
     }
     const response = { streams };
