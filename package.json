@@ -28,6 +28,9 @@
     "autotest": "node debug/test.js"
   },
   "dependencies": {
-    "stremio-addon-sdk": "1.0.x"
+    "ioredis": "^5.8.2",
+    "p-limit": "^7.2.0",
+    "stremio-addon-sdk": "^1.6.10",
+    "undici": "^7.16.0"
   }
 }
