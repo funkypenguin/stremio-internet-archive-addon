@@ -81,6 +81,14 @@ async function limitedFetchJson(url, options = {}) {
         const res = await schedule(() => fetch(url, { dispatcher, ...options }));
         if (!res.ok) {
             increment('upstreamErrors');
+            let bodySnippet = '';
+            try {
+                const text = await res.text();
+                bodySnippet = text ? ` body: ${text.slice(0, 256)}` : '';
+            } catch (err) {
+                bodySnippet = ` body: <unavailable: ${err?.message || err}>`;
+            }
+            console.warn('[fetch]', res.status, res.statusText, url, bodySnippet);
             return null;
         }
         return res.json();
