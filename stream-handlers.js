@@ -288,18 +288,22 @@ async function buildSeriesStreams(id, log = { test: false, query: false }) {
     if (!series) {
         return { streams: [] };
     }
+    const seriesName = series.name || series.title || imdbId || 'Series';
     const seasonNumber = parseInt(season, 10) || undefined;
     const episodeNumber = parseInt(ep, 10) || undefined;
-    const sMatchName = series.name.toLowerCase().replace(/\W/g, '*');
+    const sMatchName = seriesName.toLowerCase().replace(/\W/g, '*');
     const episode = series.videos?.find((e) => e.season == season && e.episode == ep);
     if (!episode) {
         return { streams: [] };
     }
-    const epName = (episode.name || episode.title)
-        .replace(/^the /i, '')
-        .replace(/\W*part\W*[0-9IVX]+\W*/i, ' ')
-        .replace(/\(.*\)/g, '')
-        .trim();
+    const epLabel = episode.name || episode.title || '';
+    const epName = epLabel
+        ? epLabel
+            .replace(/^the /i, '')
+            .replace(/\W*part\W*[0-9IVX]+\W*/i, ' ')
+            .replace(/\(.*\)/g, '')
+            .trim()
+        : `${seriesName} S${season}E${ep}`;
     const queryParts = [
         `title:("${sMatchName}" OR *${sMatchName}*)`,
         '-title:(trailer OR trailers OR promo OR promos OR review OR reviews OR interview OR interviews)',
@@ -308,7 +312,7 @@ async function buildSeriesStreams(id, log = { test: false, query: false }) {
     ];
     if ((series.genres || []).includes('Soap')) {
         const mmyyyy = (episode.name || episode.title).match(/(january|february|march|april|may|june|july|august|september|october|november|december).*([12][90]\d{2})/i);
-        queryParts[0] = mmyyyy ? `title:(${series.name.toLowerCase()} ${mmyyyy[1]} ${mmyyyy[2]})` : queryParts[0];
+        queryParts[0] = mmyyyy ? `title:(${seriesName.toLowerCase()} ${mmyyyy[1]} ${mmyyyy[2]})` : queryParts[0];
         queryParts.pop();
     }
     const archiveQuery = queryParts.join(' AND ');
@@ -352,7 +356,7 @@ async function buildSeriesStreams(id, log = { test: false, query: false }) {
                 const isWebReady = extension === 'mp4';
                 const sizeBytes = parseInt(f.size, 10) || 0;
                 const releaseSlug = buildReleaseSlug({
-                    title: docTitle || series.name,
+                    title: docTitle || seriesName,
                     year: series.year,
                     season: seasonNumber,
                     episode: episodeNumber,
@@ -370,7 +374,7 @@ async function buildSeriesStreams(id, log = { test: false, query: false }) {
                 ].filter(Boolean);
                 return {
                     url: `https://archive.org/download/${identifier}/${f.name}`,
-                    name: formatStreamName(docTitle || series.name, quality, f),
+                    name: formatStreamName(docTitle || seriesName, quality, f),
                     description: [releaseSlug, ...detailLines].join('\n'),
                     subtitles,
                     behaviorHints: {
@@ -385,7 +389,7 @@ async function buildSeriesStreams(id, log = { test: false, query: false }) {
     const response = { streams };
     if (log.test) {
         const identifier = streams?.[0]?.url?.split('/')?.[4] || '';
-        console.log(`{"id": "${id}", "name": "${series.name}", "identifier": "${identifier}", "type": "series"}`);
+        console.log(`{"id": "${id}", "name": "${seriesName}", "identifier": "${identifier}", "type": "series"}`);
     }
     return response;
 }
