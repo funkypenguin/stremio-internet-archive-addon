@@ -15,6 +15,11 @@ const dispatcher = new Agent({
     connectTimeout: 15_000,
 });
 
+const DEFAULT_FETCH_TIMEOUT_MS = Math.max(1_000, parseInt(process.env.UPSTREAM_TIMEOUT_MS || '10000', 10));
+const ARCHIVE_SEARCH_ENDPOINT = process.env.ARCHIVE_SEARCH_ENDPOINT || 'https://archive.org/advancedsearch.php';
+const ARCHIVE_SEARCH_FIELDS = ['identifier', 'title', 'description'];
+const DEFAULT_SEARCH_SORT = ['week desc'];
+
 const DEFAULT_STREAM_TTL = Math.max(60, parseInt(process.env.CACHE_STREAM_TTL || '1800', 10));
 const NEGATIVE_CACHE_TTL = Math.max(30, parseInt(process.env.CACHE_NEGATIVE_TTL || '120', 10));
 const STALE_AFTER_MS = Math.max(0, parseInt(process.env.CACHE_STALE_AFTER_SECONDS || '900', 10) * 1000);
@@ -77,8 +82,13 @@ function formatStreamName(sourceTitle, qualityTag, fileMeta) {
 }
 
 async function limitedFetchJson(url, options = {}) {
+    const { timeoutMs = DEFAULT_FETCH_TIMEOUT_MS, ...fetchOptions } = options;
+    const controller = new AbortController();
+    const timeout = Math.max(1, timeoutMs);
+    const timeoutHandle = setTimeout(() => controller.abort(), timeout);
+    timeoutHandle.unref?.();
     try {
-        const res = await schedule(() => fetch(url, { dispatcher, ...options }));
+        const res = await schedule(() => fetch(url, { dispatcher, ...fetchOptions, signal: controller.signal }));
         if (!res.ok) {
             increment('upstreamErrors');
             let bodySnippet = '';
@@ -94,8 +104,11 @@ async function limitedFetchJson(url, options = {}) {
         return res.json();
     } catch (err) {
         increment('upstreamErrors');
-        console.warn('[fetch]', url, err?.message || err);
+        const label = err?.name === 'AbortError' ? '[fetch timeout]' : '[fetch]';
+        console.warn(label, url, err?.message || err);
         return null;
+    } finally {
+        clearTimeout(timeoutHandle);
     }
 }
 
@@ -106,10 +119,19 @@ async function getCinemetaMeta(type, id) {
     });
 }
 
-async function searchArchive(queryKey, url) {
+async function searchArchive(queryKey, { query, rows, sort } = {}) {
     return deduped(`archive:search:${queryKey}`, async () => {
-        const json = await limitedFetchJson(url);
-        return json?.response?.body?.hits?.hits || [];
+        const params = new URLSearchParams();
+        const rowCount = Math.max(1, rows || MAX_STREAMS);
+        params.set('q', query);
+        params.set('rows', String(rowCount));
+        params.set('page', '1');
+        params.set('output', 'json');
+        ARCHIVE_SEARCH_FIELDS.forEach((field) => params.append('fl[]', field));
+        (sort && sort.length ? sort : DEFAULT_SEARCH_SORT).forEach((entry) => params.append('sort[]', entry));
+        const json = await limitedFetchJson(`${ARCHIVE_SEARCH_ENDPOINT}?${params.toString()}`);
+        const docs = json?.response?.docs;
+        return Array.isArray(docs) ? docs : [];
     });
 }
 
@@ -195,12 +217,19 @@ async function buildMovieStreams(imdbId, log = { test: false, query: false }) {
         'mediatype:movies',
         'item_size:["300000000" TO "100000000000"]',
     ];
-    if (log.query) console.log(queryParts.join(' AND '));
-    const iaUrl = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&sort=week:desc&hits_per_page=${MAX_STREAMS}`;
-    const results = await searchArchive(`movie:${imdbId}`, iaUrl);
+    const archiveQuery = queryParts.join(' AND ');
+    if (log.query) console.log(archiveQuery);
+    const results = await searchArchive(`movie:${imdbId}`, {
+        query: archiveQuery,
+        rows: MAX_STREAMS,
+        sort: ['week desc'],
+    });
     const streams = [];
     for (const res of results) {
-        const identifier = res.fields.identifier;
+        const identifier = res.identifier;
+        if (!identifier) continue;
+        const docTitle = res.title || '';
+        const docDescription = Array.isArray(res.description) ? res.description.join(' ') : (res.description || '');
         const files = await getArchiveFiles(identifier);
         const subtitles = files
             .filter((f) => ACCEPTED_SUBTITLES.includes(f.name.slice(-3).toLowerCase()))
@@ -209,7 +238,7 @@ async function buildMovieStreams(imdbId, log = { test: false, query: false }) {
         if (videoFiles.length === 0) {
             continue;
         }
-        const quality = (res.fields.title + videoFiles[0].name + (res.fields.description || ''))
+        const quality = ((docTitle || '') + videoFiles[0].name + docDescription)
             .match(/(?:dvd|blu-?ray|bd|hd|web|nd-?rip)-?(?:rip|dl)?|remux/i)?.[0] || '';
         streams.push(
             ...videoFiles.map((f) => {
@@ -217,7 +246,7 @@ async function buildMovieStreams(imdbId, log = { test: false, query: false }) {
                 const isWebReady = extension === 'mp4';
                 const sizeBytes = parseInt(f.size, 10) || 0;
                 const releaseSlug = buildReleaseSlug({
-                    title: res.fields.title || film.name,
+                    title: docTitle || film.name,
                     year,
                     quality,
                     resolution: f.height || undefined,
@@ -226,14 +255,14 @@ async function buildMovieStreams(imdbId, log = { test: false, query: false }) {
                 });
                 const sourceInfo = f.source ? ` (${f.source})` : '';
                 const detailLines = [
-                    res.fields.title,
+                    docTitle,
                     f.name !== releaseSlug ? `Source file: ${f.name}` : '',
                     `🎬 ${extension || 'file'}${sourceInfo}`,
                     `🕥 ${(f.length / 60).toFixed(0)} min   💾 ${sizeToString(sizeBytes)}`,
                 ].filter(Boolean);
                 return {
                     url: `https://archive.org/download/${identifier}/${f.name}`,
-                    name: formatStreamName(res.fields.title || film.name, quality, f),
+                    name: formatStreamName(docTitle || film.name, quality, f),
                     description: [releaseSlug, ...detailLines].join('\n'),
                     subtitles,
                     behaviorHints: {
@@ -282,17 +311,23 @@ async function buildSeriesStreams(id, log = { test: false, query: false }) {
         queryParts[0] = mmyyyy ? `title:(${series.name.toLowerCase()} ${mmyyyy[1]} ${mmyyyy[2]})` : queryParts[0];
         queryParts.pop();
     }
-    if (log.query) console.log(queryParts.join(' AND '));
-    const iaUrl = `https://archive.org/services/search/beta/page_production/?user_query=${encodeURIComponent(queryParts.join(' AND '))}&hits_per_page=${MAX_STREAMS_SERIES}`;
-    const results = await searchArchive(`series:${imdbId}:${season}:${ep}`, iaUrl);
+    const archiveQuery = queryParts.join(' AND ');
+    if (log.query) console.log(archiveQuery);
+    const results = await searchArchive(`series:${imdbId}:${season}:${ep}`, {
+        query: archiveQuery,
+        rows: MAX_STREAMS_SERIES,
+    });
     const epNameRegex = new RegExp('.*' + epName.replace(/[^a-z0-9]/gi, '.*') + '.*', 'i');
     const streams = [];
     for (const res of results) {
-        const identifier = res.fields.identifier;
+        const identifier = res.identifier;
+        if (!identifier) continue;
+        const docTitle = res.title || '';
+        const docDescription = Array.isArray(res.description) ? res.description.join(' ') : (res.description || '');
         const wrongSeason = new RegExp(`(?:(?:^|[^a-z])s|season)\\D?0*(?!${season}(?:\\D|$))\\d+`, 'i');
-        if ((res.fields.title + identifier).match(wrongSeason)) continue;
+        if ((docTitle + identifier).match(wrongSeason)) continue;
         let regex;
-        if ((res.fields.title + identifier).match(/season|[^a-z0-9]s[^a-z]?\d|^s[^a-z]?/i)) {
+        if ((docTitle + identifier).match(/season|[^a-z0-9]s[^a-z]?\\d|^s[^a-z]?/i)) {
             regex = new RegExp(`(?:(?:^|[^a-z])ep?|episode)\\D?0*${ep}(?:\\D|$)`, 'i');
         } else {
             regex = new RegExp(`s(?:eason)?\\D?0*${season}\\D*(?:ep?|episode)\\D?0*${ep}(?:\\D|$)`, 'i');
@@ -309,7 +344,7 @@ async function buildSeriesStreams(id, log = { test: false, query: false }) {
         if (videoFiles.length === 0) {
             continue;
         }
-        const quality = (res.fields.title + videoFiles[0].name + (res.fields.description || ''))
+        const quality = ((docTitle || '') + videoFiles[0].name + docDescription)
             .match(/(?:dvd|blu-?ray|bd|hd|web|nd-?rip)-?(?:rip|dl)?|remux/i)?.[0] || '';
         streams.push(
             ...videoFiles.map((f) => {
@@ -317,7 +352,7 @@ async function buildSeriesStreams(id, log = { test: false, query: false }) {
                 const isWebReady = extension === 'mp4';
                 const sizeBytes = parseInt(f.size, 10) || 0;
                 const releaseSlug = buildReleaseSlug({
-                    title: res.fields.title || series.name,
+                    title: docTitle || series.name,
                     year: series.year,
                     season: seasonNumber,
                     episode: episodeNumber,
@@ -328,14 +363,14 @@ async function buildSeriesStreams(id, log = { test: false, query: false }) {
                 });
                 const sourceInfo = f.source ? ` (${f.source})` : '';
                 const detailLines = [
-                    res.fields.title,
+                    docTitle,
                     f.name !== releaseSlug ? `Source file: ${f.name}` : '',
                     `🎬 ${extension || 'file'}${sourceInfo}`,
                     `🕥 ${(f.length / 60).toFixed(0)} min   💾 ${sizeToString(sizeBytes)}`,
                 ].filter(Boolean);
                 return {
                     url: `https://archive.org/download/${identifier}/${f.name}`,
-                    name: formatStreamName(res.fields.title || series.name, quality, f),
+                    name: formatStreamName(docTitle || series.name, quality, f),
                     description: [releaseSlug, ...detailLines].join('\n'),
                     subtitles,
                     behaviorHints: {
